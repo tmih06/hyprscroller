@@ -19,7 +19,7 @@ class ScrollerLayout : public Layout::Tiled::CScrollingAlgorithm {
 
     // Intercept mouse drag resizing
     virtual void resizeTarget(const Vector2D& Δ, SP<Layout::ITarget> target, Layout::eRectCorner corner = Layout::CORNER_NONE) override {
-        if (target) {
+        if (target && m_targets.size() > 1) {
             markExplicitlyResized(target);
         }
         Layout::Tiled::CScrollingAlgorithm::resizeTarget(Δ, target, corner);
@@ -29,7 +29,7 @@ class ScrollerLayout : public Layout::Tiled::CScrollingAlgorithm {
     virtual Config::ErrorResult layoutMsg(const std::string_view& sv) override {
         if (sv.starts_with("colresize +") || sv.starts_with("colresize -") || sv.starts_with("colresize 0.")) {
             auto focused = Desktop::focusState()->window();
-            if (focused && focused->layoutTarget()) {
+            if (focused && focused->layoutTarget() && m_targets.size() > 1) {
                 markExplicitlyResized(focused->layoutTarget());
             }
         }
@@ -65,6 +65,10 @@ class ScrollerLayout : public Layout::Tiled::CScrollingAlgorithm {
 
         Layout::Tiled::CScrollingAlgorithm::removeTarget(target);
 
+        if (m_targets.size() <= 1) {
+            m_explicitlyResized.clear();
+        }
+
         if (!Desktop::focusState()->window() && !m_targets.empty()) {
             for (auto it = m_targets.rbegin(); it != m_targets.rend(); ++it) {
                 auto sp = it->lock();
@@ -82,11 +86,12 @@ class ScrollerLayout : public Layout::Tiled::CScrollingAlgorithm {
         cleanupTargets();
         const size_t count = m_targets.size();
 
-        if (count == 1) {
-            // Single window on workspace fills the screen
+        if (count <= 1) {
+            // Single window always resets any previous multi-column split state and fills the screen
+            m_explicitlyResized.clear();
             (void)layoutMsg("fit all");
         } else if (count == 2) {
-            // Check if any window was explicitly customized by user
+            // Check if any window was explicitly customized by user while in multi-window state
             bool anyCustom = false;
             for (const auto& wt : m_targets) {
                 if (isExplicitlyResized(wt.lock())) {
@@ -126,13 +131,19 @@ class ScrollerLayout : public Layout::Tiled::CScrollingAlgorithm {
 
   private:
     void markExplicitlyResized(SP<Layout::ITarget> t) {
+        if (m_targets.size() <= 1)
+            return;
         if (!isExplicitlyResized(t)) {
-            m_explicitlyResized.push_back(t);
+            m_userModifiedPush(t);
         }
     }
 
+    void m_userModifiedPush(SP<Layout::ITarget> t) {
+        m_explicitlyResized.push_back(t);
+    }
+
     bool isExplicitlyResized(SP<Layout::ITarget> t) const {
-        if (!t)
+        if (!t || m_targets.size() <= 1)
             return false;
         for (const auto& wt : m_explicitlyResized) {
             if (wt.lock() == t)
