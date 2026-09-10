@@ -20,7 +20,7 @@ class ScrollerLayout : public Layout::Tiled::CScrollingAlgorithm {
     // Intercept mouse drag resizing
     virtual void resizeTarget(const Vector2D& Δ, SP<Layout::ITarget> target, Layout::eRectCorner corner = Layout::CORNER_NONE) override {
         if (target) {
-            markUserModified(target);
+            markExplicitlyResized(target);
         }
         Layout::Tiled::CScrollingAlgorithm::resizeTarget(Δ, target, corner);
     }
@@ -30,7 +30,7 @@ class ScrollerLayout : public Layout::Tiled::CScrollingAlgorithm {
         if (sv.starts_with("colresize +") || sv.starts_with("colresize -") || sv.starts_with("colresize 0.")) {
             auto focused = Desktop::focusState()->window();
             if (focused && focused->layoutTarget()) {
-                markUserModified(focused->layoutTarget());
+                markExplicitlyResized(focused->layoutTarget());
             }
         }
         return Layout::Tiled::CScrollingAlgorithm::layoutMsg(sv);
@@ -57,7 +57,7 @@ class ScrollerLayout : public Layout::Tiled::CScrollingAlgorithm {
             auto sp = wp.lock();
             return !sp || sp == target;
         });
-        std::erase_if(m_userModified, [target](const auto& wp) {
+        std::erase_if(m_explicitlyResized, [target](const auto& wp) {
             auto sp = wp.lock();
             return !sp || sp == target;
         });
@@ -83,76 +83,61 @@ class ScrollerLayout : public Layout::Tiled::CScrollingAlgorithm {
         const size_t count = m_targets.size();
 
         if (count == 1) {
-            auto t = m_targets[0].lock();
-            // Sizes that were modified by the user MUST stay.
-            if (t && !isUserModified(t)) {
-                setTargetColumnWidth(t, 1.0f);
-            }
+            // Single window on workspace fills the screen
+            (void)layoutMsg("fit all");
         } else if (count == 2) {
+            // Check if any window was explicitly customized by user
+            bool anyCustom = false;
             for (const auto& wt : m_targets) {
-                auto t = wt.lock();
-                // Sizes that were modified by the user MUST stay.
-                if (t && !isUserModified(t)) {
-                    setTargetColumnWidth(t, 0.5f);
+                if (isExplicitlyResized(wt.lock())) {
+                    anyCustom = true;
+                    break;
                 }
+            }
+
+            if (!anyCustom) {
+                // Both are default: split 50/50 and reset camera offset so both fit on screen
+                (void)layoutMsg("fit all");
+            } else {
+                (void)layoutMsg("fit_into_view");
             }
         } else if (count >= 3) {
             // New window gets default 1/3 width
-            if (newTargetPtr && !isUserModified(newTargetPtr)) {
+            if (newTargetPtr && !isExplicitlyResized(newTargetPtr)) {
                 setTargetColumnWidth(newTargetPtr, 0.333333f);
             }
-            // For other windows, only transition from 0.5 (2-window state) if NOT modified by user
+            // Existing windows: if at 0.5 (from 2-window state) and not custom, adjust to 0.333333 so 3 fit
             for (const auto& wt : m_targets) {
                 auto t = wt.lock();
-                if (t && t != newTargetPtr && !isUserModified(t)) {
+                if (t && t != newTargetPtr && !isExplicitlyResized(t)) {
                     auto data = dataFor(t);
                     if (data) {
                         auto col = data->column.lock();
-                        // Only change if it was on the default 0.5 from the 2-window state
-                        if (col && std::abs(col->getColumnWidth() - 0.5f) < 0.01f) {
+                        if (col && std::abs(col->getColumnWidth() - 0.5f) < 0.05f) {
                             col->setColumnWidth(0.333333f);
                         }
                     }
                 }
             }
+            recalculate();
+            (void)layoutMsg("fit_into_view");
         }
-
-        recalculate();
-        (void)Layout::Tiled::CScrollingAlgorithm::layoutMsg("fit_into_view");
     }
 
   private:
-    void markUserModified(SP<Layout::ITarget> t) {
-        if (!isUserModified(t)) {
-            m_userModified.push_back(t);
+    void markExplicitlyResized(SP<Layout::ITarget> t) {
+        if (!isExplicitlyResized(t)) {
+            m_explicitlyResized.push_back(t);
         }
     }
 
-    bool isUserModified(SP<Layout::ITarget> t) const {
+    bool isExplicitlyResized(SP<Layout::ITarget> t) const {
         if (!t)
             return false;
-
-        // 1. Explicitly marked via colresize or drag
-        for (const auto& wt : m_userModified) {
+        for (const auto& wt : m_explicitlyResized) {
             if (wt.lock() == t)
                 return true;
         }
-
-        // 2. Also check if the column width deviates from default standard widths (1.0, 0.5, 0.333)
-        auto data = dataFor(t);
-        if (data) {
-            auto col = data->column.lock();
-            if (col) {
-                float w = col->getColumnWidth();
-                bool isDefault1 = std::abs(w - 1.0f) < 0.01f;
-                bool isDefault2 = std::abs(w - 0.5f) < 0.01f;
-                bool isDefault3 = std::abs(w - 0.333333f) < 0.01f;
-                if (!isDefault1 && !isDefault2 && !isDefault3) {
-                    return true;
-                }
-            }
-        }
-
         return false;
     }
 
@@ -168,9 +153,9 @@ class ScrollerLayout : public Layout::Tiled::CScrollingAlgorithm {
 
     void cleanupTargets() {
         std::erase_if(m_targets, [](const auto& wp) { return wp.expired(); });
-        std::erase_if(m_userModified, [](const auto& wp) { return wp.expired(); });
+        std::erase_if(m_explicitlyResized, [](const auto& wp) { return wp.expired(); });
     }
 
     std::vector<WP<Layout::ITarget>> m_targets;
-    std::vector<WP<Layout::ITarget>> m_userModified;
+    std::vector<WP<Layout::ITarget>> m_explicitlyResized;
 };
