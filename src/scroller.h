@@ -1,111 +1,79 @@
-#ifndef SCROLLER_SCROLLER_H
-#define SCROLLER_SCROLLER_H
+#pragma once
 
-#include <hyprland/src/layout/IHyprLayout.hpp>
+#include <hyprland/src/layout/algorithm/tiled/scrolling/ScrollingAlgorithm.hpp>
+#include <hyprland/src/pointer/PointerController.hpp>
+#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/state/FocusState.hpp>
+#include <vector>
+#include <algorithm>
 
-#include "list.h"
-#include <hyprland/src/SharedDefs.hpp>
-#include <hyprland/src/devices/IPointer.hpp>
+class ScrollerLayout : public Layout::Tiled::CScrollingAlgorithm {
+  public:
+    ScrollerLayout()          = default;
+    virtual ~ScrollerLayout() = default;
 
-#include "enums.h"
+    virtual std::optional<std::string> layoutName() const override {
+        return "scroller";
+    }
 
-class Row;
+    virtual void newTarget(SP<Layout::ITarget> target) override {
+        if (!target)
+            return;
 
-class ScrollerLayout : public IHyprLayout {
-public:
-    virtual void onEnable();
-    virtual void onDisable();
+        m_targets.push_back(target);
+        cleanupTargets();
 
-    virtual void onWindowCreatedTiling(PHLWINDOW,
-                                       eDirection = DIRECTION_DEFAULT);
-    virtual bool isWindowTiled(PHLWINDOW);
-    virtual void onWindowRemovedTiling(PHLWINDOW);
-    virtual void onWindowRemovedFloating(PHLWINDOW);
-    virtual void recalculateMonitor(const MONITORID &monitor_id);
-    virtual void recalculateWindow(PHLWINDOW);
-    virtual void resizeActiveWindow(const Vector2D &delta, eRectCorner corner,
-                                    PHLWINDOW pWindow = nullptr);
-    virtual void fullscreenRequestForWindow(PHLWINDOW pWindow,
-            const eFullscreenMode CURRENT_EFFECTIVE_MODE,
-            const eFullscreenMode EFFECTIVE_MODE);
-    virtual std::any layoutMessage(SLayoutMessageHeader header,
-                                   std::string content);
-    virtual SWindowRenderLayoutHints requestRenderHints(PHLWINDOW);
-    virtual void switchWindows(PHLWINDOW, PHLWINDOW);
-    virtual void moveWindowTo(PHLWINDOW, const std::string &direction, bool silent = false);
-    virtual void alterSplitRatio(PHLWINDOW, float, bool);
-    virtual std::string getLayoutName();
-    virtual PHLWINDOW getNextWindowCandidate(PHLWINDOW);
-    virtual void onWindowFocusChange(PHLWINDOW);
-    virtual void replaceWindowDataWith(PHLWINDOW from, PHLWINDOW to);
-    virtual Vector2D predictSizeForNewWindowTiled();
+        Layout::Tiled::CScrollingAlgorithm::newTarget(target);
 
-    // New Dispatchers
-    void cycle_window_size(WORKSPACEID workspace, int step);
-    void cycle_window_width(WORKSPACEID workspace, int step);
-    void cycle_window_height(WORKSPACEID workspace, int step);
-    void set_window_size(WORKSPACEID workspace, const std::string &arg);
-    void set_window_width(WORKSPACEID workspace, const std::string &arg);
-    void set_window_height(WORKSPACEID workspace, const std::string &arg);
-    void move_focus(WORKSPACEID workspace, Direction);
-    void move_window(WORKSPACEID workspace, Direction, bool);
-    void align_window(WORKSPACEID workspace, Direction);
-    void admit_window(WORKSPACEID workspace, AdmitExpelDirection direction);
-    void expel_window(WORKSPACEID workspace, AdmitExpelDirection direction);
-    void set_mode(WORKSPACEID workspace, Mode);
-    void set_mode_modifier(WORKSPACEID workspace, const ModeModifier &);
-    void fit_size(WORKSPACEID workspace, FitSize);
-    void fit_width(WORKSPACEID workspace, FitSize);
-    void fit_height(WORKSPACEID workspace, FitSize);
-    void toggle_overview(WORKSPACEID workspace);
+        applyDynamicResizing();
 
-    void marks_add(const std::string &name);
-    void marks_delete(const std::string &name);
-    void marks_visit(const std::string &name);
-    void marks_reset();
+        if (target->window()) {
+            Pointer::pointerController()->warpTo(target->window()->middle());
+        }
+    }
 
-    void pin(WORKSPACEID workspace);
+    virtual void removeTarget(SP<Layout::ITarget> target) override {
+        std::erase_if(m_targets, [target](const auto& wp) {
+            auto sp = wp.lock();
+            return !sp || sp == target;
+        });
+        cleanupTargets();
 
-    void selection_toggle(WORKSPACEID workspace);
-    void selection_set(PHLWINDOWREF window);
-    void selection_reset();
-    void selection_workspace(WORKSPACEID workspace);
-    void selection_move(WORKSPACEID workspace, Direction direction = Direction::End);
+        Layout::Tiled::CScrollingAlgorithm::removeTarget(target);
 
-    void trail_new();
-    void trail_next();
-    void trail_prev();
-    void trail_delete();
-    void trail_clear();
-    void trail_toselection();
-    void trailmark_toggle();
-    void trailmark_next();
-    void trailmark_prev();
+        if (!Desktop::focusState()->window() && !m_targets.empty()) {
+            for (auto it = m_targets.rbegin(); it != m_targets.rend(); ++it) {
+                auto sp = it->lock();
+                if (sp && sp->window()) {
+                    Desktop::focusState()->fullWindowFocus(sp->window(), Desktop::FOCUS_REASON_UNMAP_WINDOW_TILING);
+                    break;
+                }
+            }
+        }
 
-    void jump();
+        applyDynamicResizing();
+    }
 
-    void post_event(WORKSPACEID workspace, const std::string &event);
+    void applyDynamicResizing() {
+        cleanupTargets();
+        const size_t count = m_targets.size();
 
-    void swipe_begin(IPointer::SSwipeBeginEvent);
-    void swipe_update(SCallbackInfo& info, IPointer::SSwipeUpdateEvent);
-    void swipe_end(SCallbackInfo& info, IPointer::SSwipeEndEvent);
+        if (count == 1) {
+            (void)layoutMsg("colresize all 1.0");
+            (void)layoutMsg("fit all");
+        } else if (count == 2) {
+            (void)layoutMsg("colresize all 0.5");
+            (void)layoutMsg("fit all");
+        } else if (count >= 3) {
+            (void)layoutMsg("colresize all 0.333333");
+            (void)layoutMsg("fit_into_view");
+        }
+    }
 
-    void mouse_move(SCallbackInfo& info, const Vector2D &mousePos);
+  private:
+    void cleanupTargets() {
+        std::erase_if(m_targets, [](const auto& wp) { return wp.expired(); });
+    }
 
-    bool is_enabled() const { return enabled; }
-
-private:
-    Row *getRowForWorkspace(WORKSPACEID workspace);
-    Row *getRowForWindow(PHLWINDOW window);
-    PHLWINDOW getActiveWindow(WORKSPACEID workspace);
-
-    List<Row *> rows;
-
-    bool enabled;
-    Vector2D gesture_delta;
-    bool swipe_active;
-    Direction swipe_direction;
-    bool jumping = false;
+    std::vector<WP<Layout::ITarget>> m_targets;
 };
-
-#endif  // SCROLLER_SCROLLER_H
